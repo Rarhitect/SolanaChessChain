@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from mock_data_generator import generate_mock_data
 from apply_move import apply_move, InvalidMoveException
 from pydantic import BaseModel
@@ -12,7 +13,29 @@ import dotenv
 
 dotenv.load_dotenv()
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Code to run on startup
+    print("Application is starting up...")
+    max_players = 100
+    max_matches = 200
+
+    num_players = 50
+    num_matches = 100
+
+    if num_players > max_players:
+        num_players = max_players
+
+    if num_matches > max_matches:
+        num_matches = max_matches
+
+    generate_mock_data(num_players=num_players, num_matches=num_matches)
+
+    yield
+    # Code to run on shutdown
+    print("Application is shutting down...")
+
+app = FastAPI(lifespan=lifespan)
 
 # origins = [
 #     "https://solanachesschain.vercel.app"
@@ -94,7 +117,7 @@ class ConnectionManager:
         spectators = self.game_spectators.get(game_id, [])
         for user_id in spectators:
             await self.send_personal_message(user_id, message)
-        game_response = supabase.table('games').select('*').eq('id', game_id).execute()
+        game_response = supabase.table('games').select('*').eq('game_id', game_id).execute()
         if game_response.data:
             game = game_response.data[0]
             player1_id = game.get('player1_id')
@@ -192,7 +215,7 @@ async def list_games(request:GameRequest):
 
         if abs(creator_rating - user_rating) <= 100:
             game_info = GameInfo(
-                game_id=game['id'],
+                game_id=game['game_id'],
                 creator_id=creator['id'],
                 creator_username=creator['username'],
                 creator_rating=creator_rating,
@@ -217,7 +240,7 @@ async def join_game(request: JoinGameRequest):
     
     user = user_response.data[0]
     
-    game_response = supabase.table('games').select('*').eq('id', game_id).execute()
+    game_response = supabase.table('games').select('*').eq('game_id', game_id).execute()
     if not game_response.data:
         raise HTTPException(status_code=404, detail='Game not found')
     
@@ -229,7 +252,7 @@ async def join_game(request: JoinGameRequest):
     update_response = supabase.table('games').update({
         'player2_id': user_id,
         'status': 'in_progress'
-    }).eq('id', game_id).execute()
+    }).eq('game_id', game_id).execute()
 
     if update_response.error:
         raise HTTPException(status_code=400, detail=update_response.error.message)
@@ -247,7 +270,7 @@ async def join_game(request: JoinGameRequest):
 
     supabase.table('games').update({
         'game_state': initial_game_state
-    }).eq('id', game_id).execute()
+    }).eq('game_id', game_id).execute()
 
     await manager.broadcast_to_game(game_id, {
         'type': 'game_started',
@@ -267,7 +290,7 @@ async def complete_game(request: CompleteGameRequest):
     winner_id = request.winner_id
     is_draw = request.is_draw
 
-    game_response = supabase.table('games').select('*').eq('id', game_id).execute()
+    game_response = supabase.table('games').select('*').eq('game_id', game_id).execute()
     if not game_response.data:
         raise HTTPException(status_code=404, detail='Game not found')
     
@@ -325,7 +348,7 @@ async def complete_game(request: CompleteGameRequest):
     supabase.table('users').update({'rating': int(new_rating1), 'status': 'online'}).eq('id', player1_id).execute()
     supabase.table('users').update({'rating': int(new_rating2), 'status': 'online'}).eq('id', player2_id).execute()
 
-    supabase.table('games').update({'status': 'completed'}).eq('id', game_id).execute()
+    supabase.table('games').update({'status': 'completed'}).eq('game_id', game_id).execute()
 
     await manager.send_personal_message(player1_id, f"Game completed. Your new rating is {int(new_rating1)}")
     await manager.send_personal_message(player2_id, f"Game completed. Your new rating is {int(new_rating2)}")
@@ -364,7 +387,7 @@ async def leaderboard(limit: int = 100):
 # Get game information:
 @app.get('/games/{game_id}')
 async def get_game(game_id: str):
-    game_response = supabase.table('games').select('*').eq('id', game_id).execute()
+    game_response = supabase.table('games').select('*').eq('game_id', game_id).execute()
     if not game_response.data:
         raise HTTPException(status_code=404, detail='Game not found')
     
@@ -381,7 +404,7 @@ async def spectate_game(request: SpectateGameRequest):
     if not user_response.data:
         raise HTTPException(status_code=404, detail='User not found')
 
-    game_response = supabase.table('games').select('*').eq('id', game_id).execute()
+    game_response = supabase.table('games').select('*').eq('game_id', game_id).execute()
     if not game_response.data:
         raise HTTPException(status_code=404, detail='Game not found')
     
@@ -425,7 +448,9 @@ async def make_move(request: MoveRequest):
     player_id = request.player_id
     move = request.move
 
-    game_response = supabase.table('games').select('*').eq('id', game_id).execute()
+    move = chess.Move.from_uci(move)
+
+    game_response = supabase.table('games').select('*').eq('game_id', game_id).execute()
     if not game_response.data:
         raise HTTPException(status_code=404, detail='Game not found')
     game = game_response.data[0]
@@ -447,13 +472,15 @@ async def make_move(request: MoveRequest):
         raise HTTPException(status_code=400, detail='It is not your turn')
 
     try:
-        new_game_state = apply_move(game_state, move, player_id)
+        new_game_state = apply_move(game_state, move, player_id, player1_id, player2_id)
+        other_player = player1_id if player_id == player2_id else player2_id
+        await manager.send_personal_message(other_player, f"Move {move} by {player_id} made successfully.")
     except InvalidMoveException as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     update_response = supabase.table('games').update({
         'game_state': new_game_state
-    }).eq('id', game_id).execute()
+    }).eq('game_id', game_id).execute()
 
     if update_response.error:
         raise HTTPException(status_code=500, detail='Failed to update the game state')
@@ -467,21 +494,12 @@ async def make_move(request: MoveRequest):
 
     return {'message': 'Move made successfully'}
 
-# Generate mock data: NOT SECURED!!!!!!!!!
-@app.post('/generate_mock_data')
-async def generate_mock_data_endpoint(
-    num_players: int = 50,
-    num_matches: int = 100
-):
-    max_players = 100
-    max_matches = 200
-
-    if num_players > max_players:
-        num_players = max_players
-
-    if num_matches > max_matches:
-        num_matches = max_matches
-
-    generate_mock_data(num_players=num_players, num_matches=num_matches)
-
-    return {'message': 'Mock data generated successfully'}
+# Get random pending game:
+@app.get('/random_game')
+async def get_random_game():
+    game_response = supabase.table('games').select('*').eq('status', 'pending').limit(1).execute()
+    if not game_response.data:
+        raise HTTPException(status_code=404, detail='No pending games found')
+    
+    game = game_response.data[0]
+    return game
