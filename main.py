@@ -1,5 +1,7 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from mock_data_generator import generate_mock_data
+from apply_move import apply_move, InvalidMoveException
 from pydantic import BaseModel
 from supabase import create_client, Client
 import uuid
@@ -103,9 +105,6 @@ class ConnectionManager:
                 await self.send_personal_message(player2_id, message)
 
 manager = ConnectionManager()
-
-class InvalidMoveException(Exception):
-    pass
 
 # Connecting WebSocket:
 @app.websocket("/ws/{user_id}")
@@ -468,39 +467,21 @@ async def make_move(request: MoveRequest):
 
     return {'message': 'Move made successfully'}
 
-def apply_move(game_state, move, player_id, player1_id, player2_id):
-    board_fen = game_state.get('board')
-    history = game_state.get('history', [])
+# Generate mock data: NOT SECURED!!!!!!!!!
+@app.post('/generate_mock_data')
+async def generate_mock_data_endpoint(
+    num_players: int = 50,
+    num_matches: int = 100
+):
+    max_players = 100
+    max_matches = 200
 
-    if not board_fen:
-        board = chess.Board()
-    else:
-        board = chess.Board(board_fen)
+    if num_players > max_players:
+        num_players = max_players
 
-    if player_id == player1_id:
-        player_color = chess.WHITE
-    else:
-        player_color = chess.BLACK
+    if num_matches > max_matches:
+        num_matches = max_matches
 
-    if board.turn != player_color:
-        raise InvalidMoveException('It is not your turn')
+    generate_mock_data(num_players=num_players, num_matches=num_matches)
 
-    try:
-        chess_move = board.parse_san(move)
-    except ValueError:
-        raise InvalidMoveException('Invalid move notation')
-
-    if chess_move not in board.legal_moves:
-        raise InvalidMoveException('Illegal move')
-
-    board.push(chess_move)
-
-    next_turn = player1_id if player_id == player2_id else player2_id
-
-    new_game_state = {
-        'board': board.fen(),
-        'turn': next_turn,
-        'history': history + [move]
-    }
-
-    return new_game_state
+    return {'message': 'Mock data generated successfully'}
