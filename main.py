@@ -4,9 +4,11 @@ from pydantic import BaseModel
 from supabase import create_client, Client
 import uuid
 from typing import Dict, List, Optional
-import json
 import chess
 import os
+import dotenv
+
+dotenv.load_dotenv()
 
 app = FastAPI()
 
